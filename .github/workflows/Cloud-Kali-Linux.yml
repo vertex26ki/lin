@@ -1,30 +1,35 @@
 
-name: 🐧 Ubuntu 22.04 Cloud Terminal
+name: 🐧 Ubuntu 22.04 Web Terminal
 
 on:
   workflow_dispatch:
 
 jobs:
-  ubuntu-cloud:
+  ubuntu-terminal:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
 
       # ==========================================================
-      # 1. PREPARE HOST + INSTALL TOOLS
+      # STEP 1 — HOST PREPARATION
       # ==========================================================
-      - name: 🧰 Prepare Runner
+      - name: 🧰 Prepare GitHub Runner
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🐧 PREPARING GITHUB RUNNER"
+          echo "        🐧 UBUNTU WEB TERMINAL - STARTING"
           echo "=========================================================="
 
           sudo apt-get update -y
-          sudo apt-get install -y curl wget ca-certificates
+          sudo apt-get install -y \
+            curl \
+            wget \
+            ca-certificates \
+            procps \
+            iproute2
 
           echo
           echo "[1/2] Installing cloudflared..."
@@ -33,8 +38,9 @@ jobs:
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
             -o /usr/local/bin/cloudflared
 
-          sudo chmod +x /usr/local/bin/cloudflared
+          sudo chmod 755 /usr/local/bin/cloudflared
 
+          echo "cloudflared:"
           cloudflared --version
 
           echo
@@ -44,23 +50,24 @@ jobs:
             "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
             -o /usr/local/bin/ttyd
 
-          sudo chmod +x /usr/local/bin/ttyd
+          sudo chmod 755 /usr/local/bin/ttyd
 
+          echo "ttyd:"
           ttyd --version
 
           echo
-          echo "✅ Runner prepared successfully."
+          echo "✅ Runner preparation complete."
 
       # ==========================================================
-      # 2. CREATE UBUNTU 22.04 CONTAINER
+      # STEP 2 — CREATE UBUNTU
       # ==========================================================
-      - name: 🐧 Create Ubuntu 22.04
+      - name: 🐧 Create Ubuntu 22.04 Container
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🐧 STARTING UBUNTU 22.04 CONTAINER"
+          echo "        🐧 CREATING UBUNTU 22.04"
           echo "=========================================================="
 
           docker rm -f cynet-ubuntu 2>/dev/null || true
@@ -69,88 +76,282 @@ jobs:
 
           docker run -d \
             --name cynet-ubuntu \
+            --hostname ubuntu \
+            --init \
             ubuntu:22.04 \
-            /bin/bash -c "while true; do sleep 3600; done"
+            /bin/bash -lc '
+              while true; do
+                sleep 3600
+              done
+            '
 
           echo
           echo "✅ Ubuntu container started."
 
           echo
-          echo "Ubuntu version:"
-          docker exec cynet-ubuntu cat /etc/os-release
+          echo "Container:"
+          docker ps \
+            --filter "name=cynet-ubuntu" \
+            --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
 
       # ==========================================================
-      # 3. INSTALL PACKAGES
+      # STEP 3 — INSTALL UBUNTU PACKAGES + CREATE USER
       # ==========================================================
-      - name: 📦 Install Ubuntu Packages
+      - name: 📦 Configure Ubuntu Environment
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  📦 INSTALLING PACKAGES INSIDE UBUNTU"
+          echo "        📦 CONFIGURING UBUNTU"
           echo "=========================================================="
 
-          docker exec cynet-ubuntu bash -c '
-            export DEBIAN_FRONTEND=noninteractive
+          docker exec \
+            -e DEBIAN_FRONTEND=noninteractive \
+            cynet-ubuntu \
+            bash -lc '
 
-            apt-get update -y
+              set -e
 
-            apt-get install -y \
-              bash \
-              bash-completion \
-              ca-certificates \
-              curl \
-              wget \
-              git \
-              python3 \
-              python3-pip \
-              sudo \
-              zsh \
-              tmux \
-              htop \
-              nano \
-              vim \
-              unzip \
-              zip \
-              net-tools \
-              iproute2 \
-              iputils-ping \
-              dnsutils \
-              procps \
-              psmisc \
-              file \
-              less
+              export DEBIAN_FRONTEND=noninteractive
 
-            echo
-            echo "=========================================="
-            echo " Installed packages successfully"
-            echo "=========================================="
-          '
+              echo "[1/5] Updating apt..."
+
+              apt-get update -y
+
+              echo "[2/5] Installing packages..."
+
+              apt-get install -y \
+                bash \
+                bash-completion \
+                ca-certificates \
+                curl \
+                wget \
+                git \
+                sudo \
+                python3 \
+                python3-pip \
+                python3-venv \
+                nano \
+                vim \
+                less \
+                tmux \
+                htop \
+                unzip \
+                zip \
+                file \
+                tree \
+                procps \
+                psmisc \
+                iproute2 \
+                iputils-ping \
+                dnsutils \
+                net-tools \
+                openssh-client \
+                locales \
+                command-not-found
+
+              echo "[3/5] Configuring locale..."
+
+              locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
+
+              echo "LANG=en_US.UTF-8" > /etc/default/locale
+              echo "LC_ALL=en_US.UTF-8" >> /etc/default/locale
+
+              export LANG=en_US.UTF-8
+              export LC_ALL=en_US.UTF-8
+
+              echo "[4/5] Creating user..."
+
+              # Internal Linux username is lowercase because Linux
+              # account names are conventionally lowercase.
+              if ! id ali >/dev/null 2>&1; then
+                useradd \
+                  --create-home \
+                  --shell /bin/bash \
+                  ali
+              fi
+
+              echo "ali:12345678" | chpasswd
+
+              # Passwordless sudo for the temporary environment.
+              echo "ali ALL=(ALL) NOPASSWD:ALL" \
+                > /etc/sudoers.d/ali
+
+              chmod 440 /etc/sudoers.d/ali
+
+              echo "[5/5] Building terminal environment..."
+
+              mkdir -p /home/ali
+
+              # --------------------------------------------------
+              # Bash configuration
+              # --------------------------------------------------
+              cat > /home/ali/.bashrc << '"'"'BASHRC'"'"'
+# ==============================================================
+# Interactive terminal configuration
+# ==============================================================
+
+# Terminal
+export TERM="${TERM:-xterm-256color}"
+export COLORTERM="truecolor"
+
+# Locale
+export LANG="en_US.UTF-8"
+export LC_ALL="en_US.UTF-8"
+
+# Python
+export PYTHONUNBUFFERED=1
+
+# Useful environment
+export EDITOR="nano"
+export VISUAL="nano"
+export PAGER="less -R"
+
+# History
+HISTCONTROL="ignoredups:erasedups"
+HISTSIZE=10000
+HISTFILESIZE=20000
+shopt -s histappend
+shopt -s checkwinsize
+shopt -s cmdhist
+shopt -s lithist
+
+# Better completion
+if [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+# --------------------------------------------------------------
+# Prompt
+# --------------------------------------------------------------
+if [ "$EUID" -eq 0 ]; then
+    PS1='\[\e[1;31m\]\u\[\e[0m\]@\[\e[1;36m\]\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]# '
+else
+    PS1='\[\e[1;32m\]Ali\[\e[0m\]@\[\e[1;36m\]\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+fi
+
+# --------------------------------------------------------------
+# Aliases
+# --------------------------------------------------------------
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+alias ..='cd ..'
+alias ...='cd ../..'
+
+alias cls='clear'
+
+alias py='python3'
+alias pip='python3 -m pip'
+
+alias ports='ss -tulpn'
+alias myip='curl -4 -s https://icanhazip.com'
+
+# --------------------------------------------------------------
+# Better ls colors
+# --------------------------------------------------------------
+if command -v dircolors >/dev/null 2>&1; then
+    eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+fi
+
+# --------------------------------------------------------------
+# Welcome
+# --------------------------------------------------------------
+if [ -t 1 ]; then
+    printf "\n"
+    printf "\033[1;36m"
+    printf "╔══════════════════════════════════════════════════════╗\n"
+    printf "║              UBUNTU 22.04 CLOUD TERMINAL           ║\n"
+    printf "╚══════════════════════════════════════════════════════╝\n"
+    printf "\033[0m"
+    printf "\033[1;32mUser:\033[0m Ali\n"
+    printf "\033[1;32mHost:\033[0m ubuntu\n"
+    printf "\033[1;32mShell:\033[0m bash\n"
+    printf "\033[1;32mTERM:\033[0m ${TERM}\n"
+    printf "\n"
+fi
+BASHRC
+
+              # --------------------------------------------------
+              # Login shell configuration
+              # --------------------------------------------------
+              cat > /home/ali/.bash_profile << '"'"'PROFILE'"'"'
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+PROFILE
+
+              # --------------------------------------------------
+              # Input configuration
+              # --------------------------------------------------
+              cat > /home/ali/.inputrc << '"'"'INPUTRC'
+set editing-mode emacs
+set completion-ignore-case on
+set show-all-if-ambiguous on
+set menu-complete-display-prefix on
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+INPUTRC
+
+              # --------------------------------------------------
+              # Set correct ownership
+              # --------------------------------------------------
+              chown -R ali:ali /home/ali
+
+              # --------------------------------------------------
+              # Root shell also gets correct TERM + useful prompt.
+              # --------------------------------------------------
+              cat > /root/.bashrc << '"'"'ROOTRC'"'"'
+export TERM="${TERM:-xterm-256color}"
+export COLORTERM="truecolor"
+export LANG="en_US.UTF-8"
+export LC_ALL="en_US.UTF-8"
+
+HISTCONTROL="ignoredups:erasedups"
+HISTSIZE=10000
+HISTFILESIZE=20000
+shopt -s histappend
+shopt -s checkwinsize
+
+alias ll="ls -alF"
+alias la="ls -A"
+alias l="ls -CF"
+alias cls="clear"
+
+PS1='\[\e[1;31m\]\u\[\e[0m\]@\[\e[1;36m\]\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]# '
+ROOTRC
+
+              echo
+              echo "Ubuntu configuration completed."
+            '
 
           echo
-          echo "✅ Ubuntu packages installed."
+          echo "✅ Ubuntu environment configured."
 
       # ==========================================================
-      # 4. START EVERYTHING IN ONE STEP
+      # STEP 4 — START WEB TERMINAL + CLOUDFLARE
+      # EVERYTHING REMAINS IN THIS SAME STEP
       # ==========================================================
-      - name: 🌐 Start Web Terminal + Cloudflare
+      - name: 🌐 Start Web Terminal
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🌐 STARTING WEB TERMINAL"
+          echo "       🌐 STARTING WEB TERMINAL"
           echo "=========================================================="
 
           # ------------------------------------------------------
-          # Login credentials
+          # Web login
           # ------------------------------------------------------
-          TTYD_USER="cynet"
-          TTYD_PASS="Cynet@2026"
+          WEB_USER="Ali"
+          WEB_PASS="12345678"
 
           # ------------------------------------------------------
-          # Cleanup possible old processes
+          # Clean previous processes
           # ------------------------------------------------------
           pkill -f '/usr/local/bin/ttyd' 2>/dev/null || true
           pkill -f 'cloudflared tunnel' 2>/dev/null || true
@@ -167,10 +368,26 @@ jobs:
           ttyd \
             -W \
             -p 7681 \
-            -c "${TTYD_USER}:${TTYD_PASS}" \
+            -c "${WEB_USER}:${WEB_PASS}" \
             -t fontSize=16 \
-            -t 'theme={"background":"#0f172a","foreground":"#38bdf8","cursor":"#38bdf8"}' \
-            docker exec -i cynet-ubuntu /bin/bash \
+            -t scrollback=10000 \
+            -t cursorBlink=true \
+            -t cursorStyle=block \
+            -t 'theme={"background":"#0f172a","foreground":"#e2e8f0","cursor":"#38bdf8","selectionBackground":"#334155"}' \
+            docker exec \
+              -it \
+              -e TERM=xterm-256color \
+              -e COLORTERM=truecolor \
+              -e LANG=en_US.UTF-8 \
+              -e LC_ALL=en_US.UTF-8 \
+              -e HOME=/home/ali \
+              -e USER=ali \
+              -e LOGNAME=ali \
+              -e SHELL=/bin/bash \
+              -w /home/ali \
+              --user ali \
+              cynet-ubuntu \
+              /bin/bash --login \
             > /tmp/ttyd.log 2>&1 &
 
           TTYD_PID=$!
@@ -178,22 +395,27 @@ jobs:
           echo "ttyd PID: ${TTYD_PID}"
 
           # ------------------------------------------------------
-          # Wait until ttyd listens
+          # Wait for port
           # ------------------------------------------------------
 
           READY=0
 
           for i in $(seq 1 30); do
 
-            if ss -lnt | awk '{print $4}' | grep -Eq '(^|:)7681$'; then
+            if ss -lnt 2>/dev/null \
+              | awk '{print $4}' \
+              | grep -Eq '(^|:)7681$'; then
+
               READY=1
+              echo "✅ ttyd is listening on port 7681."
               break
             fi
 
             if ! kill -0 "${TTYD_PID}" 2>/dev/null; then
               echo
-              echo "❌ ttyd exited."
+              echo "❌ ttyd stopped unexpectedly."
               echo
+              echo "----- ttyd log -----"
               cat /tmp/ttyd.log || true
               exit 1
             fi
@@ -204,13 +426,11 @@ jobs:
 
           if [ "${READY}" -ne 1 ]; then
             echo
-            echo "❌ ttyd failed to start."
+            echo "❌ ttyd failed to open port 7681."
             echo
             cat /tmp/ttyd.log || true
             exit 1
           fi
-
-          echo "✅ ttyd is listening on port 7681."
 
           # ======================================================
           # START CLOUDFLARE
@@ -229,10 +449,6 @@ jobs:
           CLOUDFLARED_PID=$!
 
           echo "cloudflared PID: ${CLOUDFLARED_PID}"
-
-          # ------------------------------------------------------
-          # Wait for Cloudflare URL
-          # ------------------------------------------------------
 
           URL=""
 
@@ -255,7 +471,7 @@ jobs:
 
             if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
               echo
-              echo "❌ cloudflared exited."
+              echo "❌ cloudflared stopped unexpectedly."
               echo
               cat /tmp/cloudflared.log || true
               exit 1
@@ -267,85 +483,93 @@ jobs:
 
           if [ -z "${URL}" ]; then
             echo
-            echo "❌ Cloudflare URL was not detected."
+            echo "❌ Could not obtain Cloudflare URL."
             echo
             cat /tmp/cloudflared.log || true
             exit 1
           fi
 
           # ======================================================
-          # SUCCESS
+          # FINAL INFORMATION
           # ======================================================
 
           echo
           echo
-          echo "=========================================================="
-          echo "          🔥 UBUNTU 22.04 IS ONLINE 🔥"
-          echo "=========================================================="
+          echo "╔══════════════════════════════════════════════════════════╗"
+          echo "║              🔥 UBUNTU 22.04 ONLINE 🔥                 ║"
+          echo "╚══════════════════════════════════════════════════════════╝"
           echo
-          echo "🌐 URL:"
+          echo "🌐 URL"
           echo "${URL}"
           echo
-          echo "👤 Username:"
-          echo "${TTYD_USER}"
+          echo "👤 Username"
+          echo "Ali"
           echo
-          echo "🔑 Password:"
-          echo "${TTYD_PASS}"
+          echo "🔑 Password"
+          echo "12345678"
+          echo
+          echo "🖥️ Terminal"
+          echo "Ubuntu 22.04"
+          echo
+          echo "👨‍💻 Linux user"
+          echo "Ali"
+          echo
+          echo "🐚 Shell"
+          echo "bash"
+          echo
+          echo "⌨️ Features"
+          echo "  • Real PTY"
+          echo "  • Arrow keys"
+          echo "  • Tab completion"
+          echo "  • Ctrl+C / Ctrl+L"
+          echo "  • clear"
+          echo "  • Colors"
+          echo "  • History"
+          echo "  • Resize"
+          echo "  • sudo"
+          echo
+          echo "⏱️ Maximum runtime: 6 hours"
           echo
           echo "=========================================================="
-          echo "  Ubuntu 22.04"
-          echo "  Web Terminal: ttyd"
-          echo "  Local Port: 7681"
-          echo "=========================================================="
-          echo
-          echo "⚠️ Temporary GitHub Actions environment"
-          echo "⚠️ Maximum runtime: 6 hours"
-          echo
-          echo "✅ EVERYTHING IS RUNNING."
           echo
 
           # ======================================================
-          # KEEP EVERYTHING ALIVE
+          # KEEP RUNNING
           # ======================================================
 
           while true; do
 
-            # Check Ubuntu container
-            if ! docker ps --format '{{.Names}}' \
+            # Ubuntu alive?
+            if ! docker ps \
+              --format '{{.Names}}' \
               | grep -qx 'cynet-ubuntu'; then
 
-              echo
               echo "❌ Ubuntu container stopped."
               docker logs cynet-ubuntu || true
               exit 1
             fi
 
-            # Check ttyd
+            # ttyd alive?
             if ! kill -0 "${TTYD_PID}" 2>/dev/null; then
 
-              echo
               echo "❌ ttyd stopped."
-              echo
               cat /tmp/ttyd.log || true
               exit 1
             fi
 
-            # Check Cloudflare
+            # Cloudflare alive?
             if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
 
-              echo
-              echo "❌ Cloudflare tunnel stopped."
-              echo
+              echo "❌ Cloudflare stopped."
               cat /tmp/cloudflared.log || true
               exit 1
             fi
 
             sleep 30
-
           done
 
       # ==========================================================
-      # 5. CLEANUP
+      # STEP 5 — CLEANUP
       # ==========================================================
       - name: 🧹 Cleanup
         if: always()
@@ -354,3 +578,4 @@ jobs:
           docker rm -f cynet-ubuntu 2>/dev/null || true
           pkill -f '/usr/local/bin/ttyd' 2>/dev/null || true
           pkill -f 'cloudflared tunnel' 2>/dev/null || true
+
