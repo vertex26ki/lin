@@ -1,0 +1,238 @@
+name: 🐧 Ubuntu Cloud Terminal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  launch-ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 📦 Prepare Ubuntu 22.04
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================================="
+          echo "  🐧 PREPARING UBUNTU 22.04"
+          echo "=========================================================="
+
+          sudo apt-get update -y
+          sudo apt-get install -y curl wget ca-certificates
+
+          echo "[1/4] Installing cloudflared..."
+          sudo curl -fsSL \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+          cloudflared --version
+
+          echo "[2/4] Installing ttyd..."
+          sudo curl -fsSL \
+            https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 \
+            -o /usr/local/bin/ttyd
+          sudo chmod +x /usr/local/bin/ttyd
+          ttyd --version
+
+          echo "[3/4] Pulling Ubuntu 22.04..."
+          docker pull ubuntu:22.04
+
+          echo "[4/4] Starting Ubuntu container..."
+          docker rm -f cynet-ubuntu 2>/dev/null || true
+
+          docker run -d \
+            --name cynet-ubuntu \
+            --restart=no \
+            ubuntu:22.04 \
+            tail -f /dev/null
+
+          echo "Ubuntu container started."
+
+      - name: 🛠️ Install packages inside Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================================="
+          echo "  🛠️ INSTALLING PACKAGES"
+          echo "=========================================================="
+
+          docker exec cynet-ubuntu bash -lc '
+            set -e
+
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update -y
+
+            apt-get install -y \
+              bash \
+              ca-certificates \
+              curl \
+              wget \
+              git \
+              python3 \
+              python3-pip \
+              sudo \
+              zsh \
+              tmux \
+              htop \
+              nano \
+              vim \
+              net-tools \
+              iproute2 \
+              iputils-ping \
+              dnsutils \
+              procps \
+              unzip
+
+            echo
+            echo "Ubuntu version:"
+            cat /etc/os-release
+
+            echo
+            echo "Installed successfully."
+          '
+
+      - name: 🌐 Start Web Terminal
+        env:
+          TTYD_PASSWORD: ${{ secrets.TTYD_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TTYD_PASSWORD:-}" ]; then
+            echo "ERROR: GitHub Actions secret TTYD_PASSWORD is not configured."
+            exit 1
+          fi
+
+          echo "=========================================================="
+          echo "  🌐 STARTING WEB TERMINAL"
+          echo "=========================================================="
+
+          USERNAME="ubuntu"
+          AUTH="${USERNAME}:${TTYD_PASSWORD}"
+
+          # Start ttyd.
+          # docker exec provides the interactive shell inside Ubuntu.
+          nohup ttyd \
+            -W \
+            -p 7681 \
+            -c "$AUTH" \
+            -t fontSize=16 \
+            -t 'theme={"background":"#0f172a","foreground":"#38bdf8","cursor":"#38bdf8"}' \
+            docker exec -it cynet-ubuntu /bin/bash \
+            > ttyd.log 2>&1 &
+
+          TTYD_PID=$!
+          echo "$TTYD_PID" > ttyd.pid
+
+          echo "Waiting for ttyd..."
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:7681/ >/dev/null 2>&1; then
+              echo "ttyd is ready."
+              break
+            fi
+
+            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
+              echo "ERROR: ttyd exited unexpectedly."
+              cat ttyd.log || true
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if ! curl -fsS http://127.0.0.1:7681/ >/dev/null 2>&1; then
+            echo "ERROR: ttyd did not start."
+            cat ttyd.log || true
+            exit 1
+          fi
+
+      - name: ☁️ Create Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================================="
+          echo "  ☁️ STARTING CLOUDFLARE TUNNEL"
+          echo "=========================================================="
+
+          nohup cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:7681 \
+            > tunnel.log 2>&1 &
+
+          CLOUDFLARED_PID=$!
+          echo "$CLOUDFLARED_PID" > cloudflared.pid
+
+          URL=""
+
+          for i in {1..30}; do
+            URL=$(
+              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log \
+              | head -n 1 \
+              || true
+            )
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "ERROR: cloudflared exited unexpectedly."
+              cat tunnel.log || true
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$URL" ]; then
+            echo "ERROR: Cloudflare tunnel URL was not detected."
+            cat tunnel.log || true
+            exit 1
+          fi
+
+          echo
+          echo "=========================================================="
+          echo "  ✅ UBUNTU 22.04 WEB TERMINAL IS READY"
+          echo "=========================================================="
+          echo
+          echo "  URL:      $URL"
+          echo "  Username: ubuntu"
+          echo "  Password: GitHub Secret TTYD_PASSWORD"
+          echo
+          echo "  The environment exists only while this workflow runs."
+          echo "=========================================================="
+          echo
+
+          echo "Keeping the workflow alive..."
+
+          while true; do
+            if ! docker ps --format '{{.Names}}' | grep -qx 'cynet-ubuntu'; then
+              echo "ERROR: Ubuntu container stopped."
+              docker logs cynet-ubuntu || true
+              exit 1
+            fi
+
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "ERROR: cloudflared stopped."
+              cat tunnel.log || true
+              exit 1
+            fi
+
+            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
+              echo "ERROR: ttyd stopped."
+              cat ttyd.log || true
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+      - name: 🧹 Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f cynet-ubuntu 2>/dev/null || true
