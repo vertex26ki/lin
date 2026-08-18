@@ -12,7 +12,7 @@ jobs:
     steps:
 
       # ==========================================================
-      # 1. PREPARE HOST
+      # 1. PREPARE HOST + INSTALL TOOLS
       # ==========================================================
       - name: 🧰 Prepare Runner
         shell: bash
@@ -20,7 +20,7 @@ jobs:
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🐧 UBUNTU CLOUD TERMINAL"
+          echo "  🐧 PREPARING GITHUB RUNNER"
           echo "=========================================================="
 
           sudo apt-get update -y
@@ -35,7 +35,6 @@ jobs:
 
           sudo chmod +x /usr/local/bin/cloudflared
 
-          echo "cloudflared:"
           cloudflared --version
 
           echo
@@ -47,22 +46,21 @@ jobs:
 
           sudo chmod +x /usr/local/bin/ttyd
 
-          echo "ttyd:"
           ttyd --version
 
           echo
-          echo "✅ Host preparation completed."
+          echo "✅ Runner prepared successfully."
 
       # ==========================================================
-      # 2. CREATE UBUNTU CONTAINER
+      # 2. CREATE UBUNTU 22.04 CONTAINER
       # ==========================================================
-      - name: 🐧 Create Ubuntu 22.04 Container
+      - name: 🐧 Create Ubuntu 22.04
         shell: bash
         run: |
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🐧 STARTING UBUNTU 22.04"
+          echo "  🐧 STARTING UBUNTU 22.04 CONTAINER"
           echo "=========================================================="
 
           docker rm -f cynet-ubuntu 2>/dev/null || true
@@ -77,10 +75,12 @@ jobs:
           echo
           echo "✅ Ubuntu container started."
 
+          echo
+          echo "Ubuntu version:"
           docker exec cynet-ubuntu cat /etc/os-release
 
       # ==========================================================
-      # 3. INSTALL USEFUL PACKAGES
+      # 3. INSTALL PACKAGES
       # ==========================================================
       - name: 📦 Install Ubuntu Packages
         shell: bash
@@ -88,7 +88,7 @@ jobs:
           set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  📦 INSTALLING PACKAGES"
+          echo "  📦 INSTALLING PACKAGES INSIDE UBUNTU"
           echo "=========================================================="
 
           docker exec cynet-ubuntu bash -c '
@@ -124,23 +124,17 @@ jobs:
 
             echo
             echo "=========================================="
-            echo " Ubuntu information"
-            echo "=========================================="
-            cat /etc/os-release
-
-            echo
-            echo "=========================================="
-            echo " Installed successfully"
+            echo " Installed packages successfully"
             echo "=========================================="
           '
 
           echo
-          echo "✅ Package installation completed."
+          echo "✅ Ubuntu packages installed."
 
       # ==========================================================
-      # 4. START WEB TERMINAL
+      # 4. START EVERYTHING IN ONE STEP
       # ==========================================================
-      - name: 🌐 Start Web Terminal
+      - name: 🌐 Start Web Terminal + Cloudflare
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -150,29 +144,27 @@ jobs:
           echo "=========================================================="
 
           # ------------------------------------------------------
-          # Login shown to the user.
+          # Login credentials
           # ------------------------------------------------------
           TTYD_USER="cynet"
           TTYD_PASS="Cynet@2026"
 
           # ------------------------------------------------------
-          # Remove old ttyd instances.
+          # Cleanup possible old processes
           # ------------------------------------------------------
           pkill -f '/usr/local/bin/ttyd' 2>/dev/null || true
-          pkill -f 'ttyd .*7681' 2>/dev/null || true
+          pkill -f 'cloudflared tunnel' 2>/dev/null || true
 
           sleep 2
 
-          # ------------------------------------------------------
-          # Start ttyd.
-          #
-          # IMPORTANT:
-          # -i is intentional.
-          # -it is NOT used because GitHub Actions background
-          # processes do not need Docker to allocate a TTY here.
-          # ttyd itself provides the browser terminal.
-          # ------------------------------------------------------
-          nohup ttyd \
+          # ======================================================
+          # START TTYD
+          # ======================================================
+
+          echo
+          echo "[1/2] Starting ttyd..."
+
+          ttyd \
             -W \
             -p 7681 \
             -c "${TTYD_USER}:${TTYD_PASS}" \
@@ -183,16 +175,11 @@ jobs:
 
           TTYD_PID=$!
 
-          echo "$TTYD_PID" > /tmp/ttyd.pid
-
-          echo "ttyd PID: $TTYD_PID"
+          echo "ttyd PID: ${TTYD_PID}"
 
           # ------------------------------------------------------
-          # Wait until port 7681 is actually listening.
-          # Do NOT depend on HTTP authentication for health check.
+          # Wait until ttyd listens
           # ------------------------------------------------------
-          echo
-          echo "Waiting for ttyd..."
 
           READY=0
 
@@ -200,70 +187,52 @@ jobs:
 
             if ss -lnt | awk '{print $4}' | grep -Eq '(^|:)7681$'; then
               READY=1
-              echo "✅ Port 7681 is listening."
               break
             fi
 
-            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
+            if ! kill -0 "${TTYD_PID}" 2>/dev/null; then
               echo
-              echo "❌ ttyd stopped unexpectedly."
+              echo "❌ ttyd exited."
               echo
               cat /tmp/ttyd.log || true
               exit 1
             fi
 
-            echo "Waiting... ${i}/30"
+            echo "Waiting for ttyd... ${i}/30"
             sleep 2
           done
 
-          if [ "$READY" -ne 1 ]; then
+          if [ "${READY}" -ne 1 ]; then
             echo
-            echo "❌ ttyd did not open port 7681."
+            echo "❌ ttyd failed to start."
             echo
-            echo "----- ttyd process -----"
-            ps aux | grep '[t]tyd' || true
-            echo
-            echo "----- listening ports -----"
-            ss -lntp || true
-            echo
-            echo "----- ttyd log -----"
             cat /tmp/ttyd.log || true
             exit 1
           fi
 
-          echo
-          echo "✅ ttyd is running."
+          echo "✅ ttyd is listening on port 7681."
+
+          # ======================================================
+          # START CLOUDFLARE
+          # ======================================================
 
           echo
-          echo "=========================================================="
-          echo "  LOGIN"
-          echo "=========================================================="
-          echo "  Username : ${TTYD_USER}"
-          echo "  Password : ${TTYD_PASS}"
-          echo "=========================================================="
-
-      # ==========================================================
-      # 5. START CLOUDFLARE QUICK TUNNEL
-      # ==========================================================
-      - name: ☁️ Start Cloudflare Tunnel
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "=========================================================="
-          echo "  ☁️ STARTING CLOUDFLARE QUICK TUNNEL"
-          echo "=========================================================="
+          echo "[2/2] Starting Cloudflare Quick Tunnel..."
 
           rm -f /tmp/cloudflared.log
 
-          nohup cloudflared tunnel \
+          cloudflared tunnel \
             --no-autoupdate \
             --url http://127.0.0.1:7681 \
             > /tmp/cloudflared.log 2>&1 &
 
           CLOUDFLARED_PID=$!
 
-          echo "$CLOUDFLARED_PID" > /tmp/cloudflared.pid
+          echo "cloudflared PID: ${CLOUDFLARED_PID}"
+
+          # ------------------------------------------------------
+          # Wait for Cloudflare URL
+          # ------------------------------------------------------
 
           URL=""
 
@@ -273,19 +242,20 @@ jobs:
           for i in $(seq 1 40); do
 
             URL=$(
-              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
-              /tmp/cloudflared.log \
-              | head -n 1 \
-              || true
+              grep -Eo \
+                'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log \
+                | head -n 1 \
+                || true
             )
 
-            if [ -n "$URL" ]; then
+            if [ -n "${URL}" ]; then
               break
             fi
 
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
               echo
-              echo "❌ cloudflared stopped unexpectedly."
+              echo "❌ cloudflared exited."
               echo
               cat /tmp/cloudflared.log || true
               exit 1
@@ -295,68 +265,78 @@ jobs:
             sleep 2
           done
 
-          if [ -z "$URL" ]; then
+          if [ -z "${URL}" ]; then
             echo
             echo "❌ Cloudflare URL was not detected."
             echo
-            echo "----- cloudflared.log -----"
             cat /tmp/cloudflared.log || true
             exit 1
           fi
 
+          # ======================================================
+          # SUCCESS
+          # ======================================================
+
           echo
           echo
           echo "=========================================================="
-          echo "           🔥 UBUNTU 22.04 IS ONLINE 🔥"
+          echo "          🔥 UBUNTU 22.04 IS ONLINE 🔥"
           echo "=========================================================="
           echo
           echo "🌐 URL:"
-          echo "$URL"
+          echo "${URL}"
           echo
           echo "👤 Username:"
-          echo "cynet"
+          echo "${TTYD_USER}"
           echo
           echo "🔑 Password:"
-          echo "Cynet@2026"
+          echo "${TTYD_PASS}"
           echo
           echo "=========================================================="
-          echo "  Browser terminal:"
           echo "  Ubuntu 22.04"
-          echo "  Port: 7681"
+          echo "  Web Terminal: ttyd"
+          echo "  Local Port: 7681"
           echo "=========================================================="
           echo
-          echo "⚠️ This environment is temporary."
-          echo "⚠️ GitHub Actions will terminate after the job ends."
+          echo "⚠️ Temporary GitHub Actions environment"
+          echo "⚠️ Maximum runtime: 6 hours"
+          echo
+          echo "✅ EVERYTHING IS RUNNING."
           echo
 
-          # ------------------------------------------------------
-          # Keep workflow alive.
-          # ------------------------------------------------------
-          echo "Keeping services alive..."
+          # ======================================================
+          # KEEP EVERYTHING ALIVE
+          # ======================================================
 
           while true; do
 
+            # Check Ubuntu container
             if ! docker ps --format '{{.Names}}' \
               | grep -qx 'cynet-ubuntu'; then
 
+              echo
               echo "❌ Ubuntu container stopped."
               docker logs cynet-ubuntu || true
               exit 1
             fi
 
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            # Check ttyd
+            if ! kill -0 "${TTYD_PID}" 2>/dev/null; then
 
-              echo "❌ cloudflared stopped."
               echo
-              cat /tmp/cloudflared.log || true
-              exit 1
-            fi
-
-            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
-
               echo "❌ ttyd stopped."
               echo
               cat /tmp/ttyd.log || true
+              exit 1
+            fi
+
+            # Check Cloudflare
+            if ! kill -0 "${CLOUDFLARED_PID}" 2>/dev/null; then
+
+              echo
+              echo "❌ Cloudflare tunnel stopped."
+              echo
+              cat /tmp/cloudflared.log || true
               exit 1
             fi
 
@@ -365,7 +345,7 @@ jobs:
           done
 
       # ==========================================================
-      # 6. CLEANUP
+      # 5. CLEANUP
       # ==========================================================
       - name: 🧹 Cleanup
         if: always()
