@@ -1,72 +1,104 @@
-name: 🐧 Ubuntu Cloud Terminal
+
+name: 🐧 Ubuntu 22.04 Cloud Terminal
 
 on:
   workflow_dispatch:
 
 jobs:
-  launch-ubuntu:
+  ubuntu-cloud:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - name: 📦 Prepare Ubuntu 22.04
+
+      # ==========================================================
+      # 1. PREPARE HOST
+      # ==========================================================
+      - name: 🧰 Prepare Runner
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🐧 PREPARING UBUNTU 22.04"
+          echo "  🐧 UBUNTU CLOUD TERMINAL"
           echo "=========================================================="
 
           sudo apt-get update -y
           sudo apt-get install -y curl wget ca-certificates
 
-          echo "[1/4] Installing cloudflared..."
+          echo
+          echo "[1/2] Installing cloudflared..."
+
           sudo curl -fsSL \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
             -o /usr/local/bin/cloudflared
+
           sudo chmod +x /usr/local/bin/cloudflared
+
+          echo "cloudflared:"
           cloudflared --version
 
-          echo "[2/4] Installing ttyd..."
+          echo
+          echo "[2/2] Installing ttyd..."
+
           sudo curl -fsSL \
-            https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 \
+            "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" \
             -o /usr/local/bin/ttyd
+
           sudo chmod +x /usr/local/bin/ttyd
+
+          echo "ttyd:"
           ttyd --version
 
-          echo "[3/4] Pulling Ubuntu 22.04..."
-          docker pull ubuntu:22.04
+          echo
+          echo "✅ Host preparation completed."
 
-          echo "[4/4] Starting Ubuntu container..."
+      # ==========================================================
+      # 2. CREATE UBUNTU CONTAINER
+      # ==========================================================
+      - name: 🐧 Create Ubuntu 22.04 Container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "=========================================================="
+          echo "  🐧 STARTING UBUNTU 22.04"
+          echo "=========================================================="
+
           docker rm -f cynet-ubuntu 2>/dev/null || true
+
+          docker pull ubuntu:22.04
 
           docker run -d \
             --name cynet-ubuntu \
-            --restart=no \
             ubuntu:22.04 \
-            tail -f /dev/null
+            /bin/bash -c "while true; do sleep 3600; done"
 
-          echo "Ubuntu container started."
+          echo
+          echo "✅ Ubuntu container started."
 
-      - name: 🛠️ Install packages inside Ubuntu
+          docker exec cynet-ubuntu cat /etc/os-release
+
+      # ==========================================================
+      # 3. INSTALL USEFUL PACKAGES
+      # ==========================================================
+      - name: 📦 Install Ubuntu Packages
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  🛠️ INSTALLING PACKAGES"
+          echo "  📦 INSTALLING PACKAGES"
           echo "=========================================================="
 
-          docker exec cynet-ubuntu bash -lc '
-            set -e
-
+          docker exec cynet-ubuntu bash -c '
             export DEBIAN_FRONTEND=noninteractive
 
             apt-get update -y
 
             apt-get install -y \
               bash \
+              bash-completion \
               ca-certificates \
               curl \
               wget \
@@ -79,98 +111,170 @@ jobs:
               htop \
               nano \
               vim \
+              unzip \
+              zip \
               net-tools \
               iproute2 \
               iputils-ping \
               dnsutils \
               procps \
-              unzip
+              psmisc \
+              file \
+              less
 
             echo
-            echo "Ubuntu version:"
+            echo "=========================================="
+            echo " Ubuntu information"
+            echo "=========================================="
             cat /etc/os-release
 
             echo
-            echo "Installed successfully."
+            echo "=========================================="
+            echo " Installed successfully"
+            echo "=========================================="
           '
 
+          echo
+          echo "✅ Package installation completed."
+
+      # ==========================================================
+      # 4. START WEB TERMINAL
+      # ==========================================================
       - name: 🌐 Start Web Terminal
-        env:
-          TTYD_PASSWORD: ${{ secrets.TTYD_PASSWORD }}
         shell: bash
         run: |
-          set -euo pipefail
-
-          if [ -z "${TTYD_PASSWORD:-}" ]; then
-            echo "ERROR: GitHub Actions secret TTYD_PASSWORD is not configured."
-            exit 1
-          fi
+          set -Eeuo pipefail
 
           echo "=========================================================="
           echo "  🌐 STARTING WEB TERMINAL"
           echo "=========================================================="
 
-          USERNAME="ubuntu"
-          AUTH="${USERNAME}:${TTYD_PASSWORD}"
+          # ------------------------------------------------------
+          # Login shown to the user.
+          # ------------------------------------------------------
+          TTYD_USER="cynet"
+          TTYD_PASS="Cynet@2026"
 
+          # ------------------------------------------------------
+          # Remove old ttyd instances.
+          # ------------------------------------------------------
+          pkill -f '/usr/local/bin/ttyd' 2>/dev/null || true
+          pkill -f 'ttyd .*7681' 2>/dev/null || true
+
+          sleep 2
+
+          # ------------------------------------------------------
           # Start ttyd.
-          # docker exec provides the interactive shell inside Ubuntu.
+          #
+          # IMPORTANT:
+          # -i is intentional.
+          # -it is NOT used because GitHub Actions background
+          # processes do not need Docker to allocate a TTY here.
+          # ttyd itself provides the browser terminal.
+          # ------------------------------------------------------
           nohup ttyd \
             -W \
             -p 7681 \
-            -c "$AUTH" \
+            -c "${TTYD_USER}:${TTYD_PASS}" \
             -t fontSize=16 \
             -t 'theme={"background":"#0f172a","foreground":"#38bdf8","cursor":"#38bdf8"}' \
-            docker exec -it cynet-ubuntu /bin/bash \
-            > ttyd.log 2>&1 &
+            docker exec -i cynet-ubuntu /bin/bash \
+            > /tmp/ttyd.log 2>&1 &
 
           TTYD_PID=$!
-          echo "$TTYD_PID" > ttyd.pid
 
+          echo "$TTYD_PID" > /tmp/ttyd.pid
+
+          echo "ttyd PID: $TTYD_PID"
+
+          # ------------------------------------------------------
+          # Wait until port 7681 is actually listening.
+          # Do NOT depend on HTTP authentication for health check.
+          # ------------------------------------------------------
+          echo
           echo "Waiting for ttyd..."
-          for i in {1..20}; do
-            if curl -fsS http://127.0.0.1:7681/ >/dev/null 2>&1; then
-              echo "ttyd is ready."
+
+          READY=0
+
+          for i in $(seq 1 30); do
+
+            if ss -lnt | awk '{print $4}' | grep -Eq '(^|:)7681$'; then
+              READY=1
+              echo "✅ Port 7681 is listening."
               break
             fi
 
             if ! kill -0 "$TTYD_PID" 2>/dev/null; then
-              echo "ERROR: ttyd exited unexpectedly."
-              cat ttyd.log || true
+              echo
+              echo "❌ ttyd stopped unexpectedly."
+              echo
+              cat /tmp/ttyd.log || true
               exit 1
             fi
 
+            echo "Waiting... ${i}/30"
             sleep 2
           done
 
-          if ! curl -fsS http://127.0.0.1:7681/ >/dev/null 2>&1; then
-            echo "ERROR: ttyd did not start."
-            cat ttyd.log || true
+          if [ "$READY" -ne 1 ]; then
+            echo
+            echo "❌ ttyd did not open port 7681."
+            echo
+            echo "----- ttyd process -----"
+            ps aux | grep '[t]tyd' || true
+            echo
+            echo "----- listening ports -----"
+            ss -lntp || true
+            echo
+            echo "----- ttyd log -----"
+            cat /tmp/ttyd.log || true
             exit 1
           fi
 
-      - name: ☁️ Create Cloudflare Quick Tunnel
+          echo
+          echo "✅ ttyd is running."
+
+          echo
+          echo "=========================================================="
+          echo "  LOGIN"
+          echo "=========================================================="
+          echo "  Username : ${TTYD_USER}"
+          echo "  Password : ${TTYD_PASS}"
+          echo "=========================================================="
+
+      # ==========================================================
+      # 5. START CLOUDFLARE QUICK TUNNEL
+      # ==========================================================
+      - name: ☁️ Start Cloudflare Tunnel
         shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
 
           echo "=========================================================="
-          echo "  ☁️ STARTING CLOUDFLARE TUNNEL"
+          echo "  ☁️ STARTING CLOUDFLARE QUICK TUNNEL"
           echo "=========================================================="
+
+          rm -f /tmp/cloudflared.log
 
           nohup cloudflared tunnel \
             --no-autoupdate \
             --url http://127.0.0.1:7681 \
-            > tunnel.log 2>&1 &
+            > /tmp/cloudflared.log 2>&1 &
 
           CLOUDFLARED_PID=$!
-          echo "$CLOUDFLARED_PID" > cloudflared.pid
+
+          echo "$CLOUDFLARED_PID" > /tmp/cloudflared.pid
 
           URL=""
 
-          for i in {1..30}; do
+          echo
+          echo "Waiting for Cloudflare URL..."
+
+          for i in $(seq 1 40); do
+
             URL=$(
-              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log \
+              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
+              /tmp/cloudflared.log \
               | head -n 1 \
               || true
             )
@@ -180,59 +284,93 @@ jobs:
             fi
 
             if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo "ERROR: cloudflared exited unexpectedly."
-              cat tunnel.log || true
+              echo
+              echo "❌ cloudflared stopped unexpectedly."
+              echo
+              cat /tmp/cloudflared.log || true
               exit 1
             fi
 
+            echo "Waiting... ${i}/40"
             sleep 2
           done
 
           if [ -z "$URL" ]; then
-            echo "ERROR: Cloudflare tunnel URL was not detected."
-            cat tunnel.log || true
+            echo
+            echo "❌ Cloudflare URL was not detected."
+            echo
+            echo "----- cloudflared.log -----"
+            cat /tmp/cloudflared.log || true
             exit 1
           fi
 
           echo
+          echo
           echo "=========================================================="
-          echo "  ✅ UBUNTU 22.04 WEB TERMINAL IS READY"
+          echo "           🔥 UBUNTU 22.04 IS ONLINE 🔥"
           echo "=========================================================="
           echo
-          echo "  URL:      $URL"
-          echo "  Username: ubuntu"
-          echo "  Password: GitHub Secret TTYD_PASSWORD"
+          echo "🌐 URL:"
+          echo "$URL"
           echo
-          echo "  The environment exists only while this workflow runs."
+          echo "👤 Username:"
+          echo "cynet"
+          echo
+          echo "🔑 Password:"
+          echo "Cynet@2026"
+          echo
           echo "=========================================================="
+          echo "  Browser terminal:"
+          echo "  Ubuntu 22.04"
+          echo "  Port: 7681"
+          echo "=========================================================="
+          echo
+          echo "⚠️ This environment is temporary."
+          echo "⚠️ GitHub Actions will terminate after the job ends."
           echo
 
-          echo "Keeping the workflow alive..."
+          # ------------------------------------------------------
+          # Keep workflow alive.
+          # ------------------------------------------------------
+          echo "Keeping services alive..."
 
           while true; do
-            if ! docker ps --format '{{.Names}}' | grep -qx 'cynet-ubuntu'; then
-              echo "ERROR: Ubuntu container stopped."
+
+            if ! docker ps --format '{{.Names}}' \
+              | grep -qx 'cynet-ubuntu'; then
+
+              echo "❌ Ubuntu container stopped."
               docker logs cynet-ubuntu || true
               exit 1
             fi
 
             if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
-              echo "ERROR: cloudflared stopped."
-              cat tunnel.log || true
+
+              echo "❌ cloudflared stopped."
+              echo
+              cat /tmp/cloudflared.log || true
               exit 1
             fi
 
             if ! kill -0 "$TTYD_PID" 2>/dev/null; then
-              echo "ERROR: ttyd stopped."
-              cat ttyd.log || true
+
+              echo "❌ ttyd stopped."
+              echo
+              cat /tmp/ttyd.log || true
               exit 1
             fi
 
             sleep 30
+
           done
 
+      # ==========================================================
+      # 6. CLEANUP
+      # ==========================================================
       - name: 🧹 Cleanup
         if: always()
         shell: bash
         run: |
           docker rm -f cynet-ubuntu 2>/dev/null || true
+          pkill -f '/usr/local/bin/ttyd' 2>/dev/null || true
+          pkill -f 'cloudflared tunnel' 2>/dev/null || true
