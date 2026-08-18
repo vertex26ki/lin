@@ -1,0 +1,283 @@
+
+name: Ubuntu 22.04 Cloud Terminal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Prepare runner
+        shell: bash
+        run: |
+          set -e
+
+          sudo apt-get update -y
+          sudo apt-get install -y curl wget ca-certificates
+
+          sudo curl -L \
+            https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 \
+            -o /usr/local/bin/ttyd
+
+          sudo chmod +x /usr/local/bin/ttyd
+
+          sudo curl -L \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+
+          sudo chmod +x /usr/local/bin/cloudflared
+
+          ttyd --version
+          cloudflared --version
+
+      - name: Create Ubuntu
+        shell: bash
+        run: |
+          set -e
+
+          docker rm -f ubuntu-cloud 2>/dev/null || true
+
+          docker pull ubuntu:22.04
+
+          docker run -d \
+            --name ubuntu-cloud \
+            --hostname ubuntu \
+            ubuntu:22.04 \
+            bash -c 'while true; do sleep 3600; done'
+
+      - name: Configure Ubuntu
+        shell: bash
+        run: |
+          set -e
+
+          docker exec ubuntu-cloud bash -c '
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update -y
+
+            apt-get install -y \
+              bash \
+              bash-completion \
+              sudo \
+              curl \
+              wget \
+              git \
+              nano \
+              vim \
+              less \
+              htop \
+              tmux \
+              unzip \
+              zip \
+              python3 \
+              python3-pip \
+              python3-venv \
+              net-tools \
+              iproute2 \
+              iputils-ping \
+              dnsutils \
+              procps \
+              psmisc \
+              file \
+              tree \
+              ca-certificates
+
+            if ! id ali >/dev/null 2>&1; then
+              useradd -m -s /bin/bash ali
+            fi
+
+            echo "ali:12345678" | chpasswd
+
+            echo "ali ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ali
+            chmod 440 /etc/sudoers.d/ali
+
+            cat > /home/ali/.bashrc << "EOF"
+export TERM="${TERM:-xterm-256color}"
+export COLORTERM="truecolor"
+export LANG="C.UTF-8"
+export LC_ALL="C.UTF-8"
+
+export EDITOR="nano"
+
+HISTCONTROL="ignoredups:erasedups"
+HISTSIZE=10000
+HISTFILESIZE=20000
+
+shopt -s histappend
+shopt -s checkwinsize
+shopt -s cmdhist
+shopt -s lithist
+
+if [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+alias ll="ls -alF"
+alias la="ls -A"
+alias l="ls -CF"
+alias cls="clear"
+alias py="python3"
+alias pip="python3 -m pip"
+
+PS1='\[\e[1;32m\]Ali\[\e[0m\]@\[\e[1;36m\]ubuntu\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+EOF
+
+            cat > /home/ali/.bash_profile << "EOF"
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+EOF
+
+            cat > /home/ali/.inputrc << "EOF"
+set editing-mode emacs
+set completion-ignore-case on
+set show-all-if-ambiguous on
+EOF
+
+            chown -R ali:ali /home/ali
+          '
+
+      - name: Start terminal
+        shell: bash
+        run: |
+          set -e
+
+          USERNAME="Ali"
+          PASSWORD="12345678"
+
+          pkill -f "ttyd" 2>/dev/null || true
+          pkill -f "cloudflared tunnel" 2>/dev/null || true
+
+          sleep 2
+
+          ttyd \
+            -W \
+            -p 7681 \
+            -c "${USERNAME}:${PASSWORD}" \
+            -t fontSize=16 \
+            -t scrollback=10000 \
+            -t cursorBlink=true \
+            -t cursorStyle=block \
+            -t 'theme={"background":"#0f172a","foreground":"#e2e8f0","cursor":"#38bdf8","selectionBackground":"#334155"}' \
+            docker exec \
+              -it \
+              -e TERM=xterm-256color \
+              -e COLORTERM=truecolor \
+              -e LANG=C.UTF-8 \
+              -e LC_ALL=C.UTF-8 \
+              -e HOME=/home/ali \
+              -e USER=ali \
+              -e LOGNAME=ali \
+              -e SHELL=/bin/bash \
+              -w /home/ali \
+              --user ali \
+              ubuntu-cloud \
+              /bin/bash --login \
+            > /tmp/ttyd.log 2>&1 &
+
+          TTYD_PID=$!
+
+          echo "Waiting for ttyd..."
+
+          for i in $(seq 1 30); do
+            if ss -lnt | grep -q ":7681 "; then
+              echo "ttyd is ready."
+              break
+            fi
+
+            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
+              echo "ttyd failed."
+              cat /tmp/ttyd.log || true
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if ! ss -lnt | grep -q ":7681 "; then
+            echo "ttyd did not start."
+            cat /tmp/ttyd.log || true
+            exit 1
+          fi
+
+          echo "Starting Cloudflare..."
+
+          cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:7681 \
+            > /tmp/cloudflared.log 2>&1 &
+
+          CLOUDFLARED_PID=$!
+
+          URL=""
+
+          for i in $(seq 1 40); do
+            URL=$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "Cloudflare failed."
+              cat /tmp/cloudflared.log || true
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$URL" ]; then
+            echo "Cloudflare URL was not created."
+            cat /tmp/cloudflared.log || true
+            exit 1
+          fi
+
+          echo
+          echo "======================================================"
+          echo "              UBUNTU 22.04 ONLINE"
+          echo "======================================================"
+          echo
+          echo "URL:"
+          echo "$URL"
+          echo
+          echo "Username: Ali"
+          echo "Password: 12345678"
+          echo
+          echo "Linux user: ali"
+          echo "Ubuntu: 22.04"
+          echo
+          echo "======================================================"
+          echo
+
+          while true; do
+            if ! docker ps --format "{{.Names}}" | grep -qx "ubuntu-cloud"; then
+              echo "Ubuntu container stopped."
+              exit 1
+            fi
+
+            if ! kill -0 "$TTYD_PID" 2>/dev/null; then
+              echo "ttyd stopped."
+              cat /tmp/ttyd.log || true
+              exit 1
+            fi
+
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "Cloudflare stopped."
+              cat /tmp/cloudflared.log || true
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f ubuntu-cloud 2>/dev/null || true
+          pkill -f ttyd 2>/dev/null || true
+          pkill -f "cloudflared tunnel" 2>/dev/null || true
